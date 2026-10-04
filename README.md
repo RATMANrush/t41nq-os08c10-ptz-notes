@@ -17,3 +17,5 @@ Layout:
 Apply a patch from the root of the matching source tree: `patch -p1 < file.patch`.
 
 Not included: OEM binaries (person-detection model and library, vendor motor.ko), firmware images, credentials.
+
+Licensing: each patch applies to, and is distributed under the licence of, the project named in its directory (thingino-firmware, raptor, raptor-hal, ingenic-sdk). Please check the licence of the target project before reusing a patch.
