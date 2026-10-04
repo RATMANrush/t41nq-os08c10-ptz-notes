@@ -1,0 +1,31 @@
+--- a/rvd/rvd_ptz.c
++++ b/rvd/rvd_ptz.c
+@@ -12,8 +12,15 @@
+ #define MOTOR_GET_BUSY (0xC0046D00UL + 8)
+ #define PAN_MAX 1020
+ #define TILT_MAX 240
++#define PAN_STEP_MIN 12
++#define PAN_STEP_MAX 20
+ struct motor_xy { int x; int y; };
+ static int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
++static int pan_step(int error)
++{
++    int step = error < 0 ? -error : error;
++    return clampi(step / 8, PAN_STEP_MIN, PAN_STEP_MAX);
++}
+ static void release_motor(rvd_state_t *st, bool stop)
+ {
+     if (!st->ptz_owns_motor) return;
+@@ -89,7 +96,11 @@
+     }
+     if (best < 0) return;
+     int ex = (box[0]+box[2])/2-w/2, ey = (box[1]+box[3])/2-h/2;
+-    int dx = ex > w/10 ? 8 : ex < -w/10 ? -8 : 0;
++    /* Pan was previously limited to eight coordinates per detection.
++     * Use a bounded error-proportional step: far targets catch up faster,
++     * while the final correction remains small and stable near centre. */
++    int px = pan_step(ex);
++    int dx = ex > w/10 ? px : ex < -w/10 ? -px : 0;
+     int dy = ey > h/10 ? -4 : ey < -h/10 ? 4 : 0;
+     if (!dx && !dy) return;
+     /* Manual control holds this same lock for its entire movement. */

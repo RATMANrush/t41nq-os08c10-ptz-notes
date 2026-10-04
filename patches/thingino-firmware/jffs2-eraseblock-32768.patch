@@ -1,0 +1,11 @@
+--- a/Makefile.utils
++++ b/Makefile.utils
+@@ -175,7 +175,7 @@
+ 	done
+ 	# pack the data partition image
+ 	$(HOST_DIR)/sbin/mkfs.jffs2 --little-endian --squash --output=$@ --root=$(OUTPUT_DIR)/data/overlay/ \
+-		--eraseblock=$(ALIGN_BLOCK) --pad=$(DATA_PARTITION_SIZE)
++		--eraseblock=32768 --pad=$(DATA_PARTITION_SIZE)
+ 
+ # rebuild kernel
+ $(KERNEL_BIN):

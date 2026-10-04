@@ -1,0 +1,12 @@
+--- a/rvd/rvd_ptz.c
++++ b/rvd/rvd_ptz.c
+@@ -102,6 +102,9 @@
+     int px = pan_step(ex);
+     int dx = ex > w/10 ? px : ex < -w/10 ? -px : 0;
+     int dy = ey > h/10 ? 4 : ey < -h/10 ? -4 : 0;
++    /* Motor direction versus image orientation depends on mounting and flip. */
++    if (rss_config_get_bool(st->cfg, "motion", "ptz_invert_pan", true)) dx = -dx;
++    if (rss_config_get_bool(st->cfg, "motion", "ptz_invert_tilt", false)) dy = -dy;
+     if (!dx && !dy) return;
+     /* Manual control holds this same lock for its entire movement. */
+     if (flock(st->ptz_lock_fd, LOCK_EX | LOCK_NB) < 0) return;

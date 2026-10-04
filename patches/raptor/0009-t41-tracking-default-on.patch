@@ -1,0 +1,11 @@
+--- a/rvd/rvd_ptz.c
++++ b/rvd/rvd_ptz.c
+@@ -38,7 +38,7 @@
+     st->ptz_fd = st->ptz_lock_fd = -1;
+     st->ptz_owns_motor = false;
+     st->ptz_last_us = st->ptz_retry_us = 0;
+-    atomic_store(&st->ptz_tracking, rss_config_get_bool(st->cfg, "motion", "ptz_tracking", false));
++    atomic_store(&st->ptz_tracking, rss_config_get_bool(st->cfg, "motion", "ptz_tracking", true));
+     return RSS_OK;
+ }
+ /* Called in the IVS thread even when no person is detected. Never waits for a motor. */

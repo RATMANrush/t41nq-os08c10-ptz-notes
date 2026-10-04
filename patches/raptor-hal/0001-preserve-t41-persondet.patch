@@ -1,0 +1,117 @@
+diff --git a/Makefile b/Makefile
+index c1e564c..975821a 100644
+--- a/Makefile
++++ b/Makefile
+@@ -117,7 +117,7 @@ AUDIO_SRCS := src/hal_audio.c \
+               src/hal_dmic.c
+ 
+ CXX_SRCS :=
+-ifneq ($(JZDL_INCLUDE),)
++ifeq ($(JZDL),1)
+ CXX_SRCS += src/hal_ivs_jzdl.cpp
+ CXXFLAGS := $(filter-out -std=c11,$(CFLAGS)) -std=c++11 -Wno-missing-field-initializers -DJZ_MXU=0 -I$(JZDL_INCLUDE) -fno-exceptions -fno-rtti
+ endif
+diff --git a/src/hal_ivs.c b/src/hal_ivs.c
+index dfcfd7a..dfe31f7 100644
+--- a/src/hal_ivs.c
++++ b/src/hal_ivs.c
+@@ -78,11 +78,30 @@ typedef struct {
+     int64_t timeStamp;
+ } persondet_param_output_t;
+ 
+-/* PersonDet interface — provided by libpersonDet_inf.so */
++/* Person detection interface */
+ #ifdef PERSONDET
++#if defined(PLATFORM_T41)
++extern IMPIVSInterface *PersonvehiclepetDetInterfaceInit(void *param);
++extern void PersonvehiclepetDetInterfaceExit(IMPIVSInterface *inf);
++
++typedef struct {
++    unsigned char raw[288];
++} t41_pvp_param_t;
++
++static void t41_pvp_put_u32(t41_pvp_param_t *p, unsigned int off, unsigned int value)
++{
++    memcpy(&p->raw[off], &value, sizeof(value));
++}
++
++static void t41_pvp_put_ptr(t41_pvp_param_t *p, unsigned int off, const void *value)
++{
++    memcpy(&p->raw[off], &value, sizeof(value));
++}
++#else
+ extern IMPIVSInterface *PersonDetInterfaceInit(void *param);
+ extern void PersonDetInterfaceExit(IMPIVSInterface *inf);
+ #endif
++#endif
+ 
+ /* ================================================================
+  * GROUP LIFECYCLE
+@@ -322,6 +341,45 @@ void *hal_ivs_create_persondet_interface(void *ctx, void *param)
+         return NULL;
+ 
+     const rss_ivs_persondet_param_t *rp = (const rss_ivs_persondet_param_t *)param;
++
++#if defined(PLATFORM_T41)
++    static const char model_path[] = "/usr/share/raptor/personvehiclepet_det.bin";
++    t41_pvp_param_t pp;
++    unsigned int sense;
++    unsigned int detdist;
++    unsigned int move;
++
++    memset(&pp, 0, sizeof(pp));
++
++    /*
++     * Native T41 personvehiclepetDet 7.2.0 ABI reconstructed from
++     * the OEM ipc_server / HI_SDK_StartPDChannel implementation.
++     */
++    sense = rp->sensitivity < 0 ? 0 :
++            (rp->sensitivity > 6 ? 6 : (unsigned int)rp->sensitivity);
++    detdist = rp->det_distance < 0 ? 0 :
++              (rp->det_distance > 4 ? 4 : (unsigned int)rp->det_distance);
++    move = rp->motion_trigger ? 1U : 0U;
++
++    t41_pvp_put_u32(&pp, 0x004, 20);
++    t41_pvp_put_ptr(&pp, 0x008, model_path);
++    t41_pvp_put_u32(&pp, 0x010, sense);
++    pp.raw[0x018] = (unsigned char)move;
++    pp.raw[0x019] = (unsigned char)move;
++    t41_pvp_put_u32(&pp, 0x01c, detdist);
++    t41_pvp_put_u32(&pp, 0x020, 20);
++    t41_pvp_put_u32(&pp, 0x024, 20);
++    t41_pvp_put_u32(&pp, 0x0f8, (unsigned int)rp->skip_frame_count);
++    t41_pvp_put_u32(&pp, 0x104, (unsigned int)rp->width);
++    t41_pvp_put_u32(&pp, 0x108, (unsigned int)rp->height);
++    t41_pvp_put_u32(&pp, 0x11c, 0x00900000);
++
++    HAL_LOG_INFO("IVS T41 persondet: %dx%d sense=%u detdist=%u skip=%d move=%u model=%s",
++                 rp->width, rp->height, sense, detdist,
++                 rp->skip_frame_count, move, model_path);
++
++    return (void *)PersonvehiclepetDetInterfaceInit(&pp);
++#else
+     persondet_param_input_t pp;
+     memset(&pp, 0, sizeof(pp));
+ 
+@@ -340,6 +398,7 @@ void *hal_ivs_create_persondet_interface(void *ctx, void *param)
+                  pp.enable_move);
+ 
+     return (void *)PersonDetInterfaceInit(&pp);
++#endif
+ }
+ 
+ int hal_ivs_destroy_persondet_interface(void *ctx, void *handle)
+@@ -347,7 +406,13 @@ int hal_ivs_destroy_persondet_interface(void *ctx, void *handle)
+     (void)ctx;
+     if (!handle)
+         return RSS_ERR_INVAL;
++
++#if defined(PLATFORM_T41)
++    PersonvehiclepetDetInterfaceExit((IMPIVSInterface *)handle);
++#else
+     PersonDetInterfaceExit((IMPIVSInterface *)handle);
++#endif
++
+     return RSS_OK;
+ }
+ #endif

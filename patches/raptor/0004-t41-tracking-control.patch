@@ -1,0 +1,304 @@
+--- a/rvd/rvd_ptz.c
++++ b/rvd/rvd_ptz.c
+@@ -1,145 +1,114 @@
+-/* Optional T41 person-following backend.  Disabled unless motion.ptz_tracking
+- * is explicitly enabled.  It uses the existing vendor /dev/motor ABI and does
+- * not alter the camera's calibrated direction or step settings. */
++/* T41 person tracking; directions match the calibrated vendor motors tool. */
+ #include "rvd.h"
+-
+ #include <fcntl.h>
+ #include <errno.h>
+ #include <sys/file.h>
+ #include <sys/ioctl.h>
+ #include <unistd.h>
+ #include <string.h>
+-
+-#define MOTOR_DEV "/dev/motor"
+-#define MOTOR_LOCK "/run/motors.lock"
+-#define MOTOR_ACTIVE "/run/motors-active"
++#define MOTOR_STOP (0xC0046D00UL + 0)
++#define MOTOR_ABSOLUTE (0xC0046D00UL + 3)
++#define MOTOR_GET_POSITION (0xC0046D00UL + 4)
++#define MOTOR_GET_BUSY (0xC0046D00UL + 8)
+ #define PAN_MAX 1020
+ #define TILT_MAX 240
+-#define MOTOR_ABSOLUTE (0xC0046D00UL + 0x03)
+-#define MOTOR_GET_POSITION (0xC0046D00UL + 0x04)
+-
+ struct motor_xy { int x; int y; };
+-
+-static void motor_active(bool on)
++static int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
++static void release_motor(rvd_state_t *st, bool stop)
+ {
+-        if (on) {
+-                int fd = open(MOTOR_ACTIVE, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+-                if (fd >= 0) {
+-                        (void)write(fd, "1\n", 2);
+-                        close(fd);
+-                }
+-        } else {
+-                (void)unlink(MOTOR_ACTIVE);
+-        }
++    if (!st->ptz_owns_motor) return;
++    if (stop) {
++        struct motor_xy p = {0};
++        if (ioctl(st->ptz_fd, MOTOR_STOP, &p) < 0)
++            RSS_WARN("PTZ: stop failed: %s", strerror(errno));
++    }
++    unlink("/run/motors-active");
++    flock(st->ptz_lock_fd, LOCK_UN);
++    st->ptz_owns_motor = false;
+ }
+-
+-static int clampi(int v, int lo, int hi)
+-{
+-        return v < lo ? lo : (v > hi ? hi : v);
+-}
+-
+ int rvd_ptz_init(rvd_state_t *st)
+ {
+-        st->ptz_fd = -1;
+-        st->ptz_lock_fd = -1;
+-        st->ptz_tracking = rss_config_get_bool(st->cfg, "motion", "ptz_tracking", false);
+-        st->ptz_last_us = 0;
+-        if (!st->ptz_tracking)
+-                return RSS_OK;
+-
+-        st->ptz_fd = open(MOTOR_DEV, O_RDWR | O_CLOEXEC);
+-        st->ptz_lock_fd = open(MOTOR_LOCK, O_RDWR | O_CREAT, 0666);
+-        if (st->ptz_fd < 0 || st->ptz_lock_fd < 0) {
+-                RSS_WARN("PTZ: tracking enabled but /dev/motor is unavailable");
+-                if (st->ptz_fd >= 0) close(st->ptz_fd);
+-                if (st->ptz_lock_fd >= 0) close(st->ptz_lock_fd);
+-                st->ptz_fd = st->ptz_lock_fd = -1;
+-                st->ptz_tracking = false;
+-                return RSS_OK;
+-        }
+-
+-        struct motor_xy p = {510, 120};
+-        if (ioctl(st->ptz_fd, MOTOR_GET_POSITION, &p) == 0) {
+-                st->ptz_x = clampi(p.x, 0, PAN_MAX);
+-                st->ptz_y = clampi(p.y, 0, TILT_MAX);
+-        } else {
+-                st->ptz_x = 510;
+-                st->ptz_y = 120;
+-        }
+-        RSS_INFO("PTZ: person tracking enabled at %d,%d", st->ptz_x, st->ptz_y);
+-        return RSS_OK;
++    st->ptz_fd = st->ptz_lock_fd = -1;
++    st->ptz_owns_motor = false;
++    st->ptz_last_us = st->ptz_retry_us = 0;
++    atomic_store(&st->ptz_tracking, rss_config_get_bool(st->cfg, "motion", "ptz_tracking", false));
++    return RSS_OK;
+ }
+-
++/* Called in the IVS thread even when no person is detected. Never waits for a motor. */
++void rvd_ptz_tick(rvd_state_t *st)
++{
++    bool enabled = atomic_load(&st->ptz_tracking);
++    if (st->ptz_owns_motor) {
++        int busy = 0;
++        int ret = ioctl(st->ptz_fd, MOTOR_GET_BUSY, &busy);
++        bool timed_out = rss_timestamp_us() - st->ptz_last_us > 2000000;
++        if (!enabled || ret < 0 || timed_out || !busy)
++            release_motor(st, !enabled || ret < 0 || timed_out);
++    }
++    if (!enabled || st->ptz_fd >= 0) return;
++    int64_t now = rss_timestamp_us();
++    if (now < st->ptz_retry_us) return;
++    st->ptz_retry_us = now + 2000000;
++    int fd = open("/dev/motor", O_RDWR | O_CLOEXEC);
++    if (fd < 0) return; /* S35 loads the motor after Raptor has started. */
++    int lock = open("/run/motors.lock", O_RDWR | O_CREAT | O_CLOEXEC, 0666);
++    if (lock < 0) { close(fd); return; }
++    st->ptz_fd = fd; st->ptz_lock_fd = lock;
++    RSS_INFO("PTZ: person tracking motor ready");
++}
+ void rvd_ptz_deinit(rvd_state_t *st)
+ {
+-        if (st->ptz_fd >= 0) close(st->ptz_fd);
+-        if (st->ptz_lock_fd >= 0) close(st->ptz_lock_fd);
+-        st->ptz_fd = st->ptz_lock_fd = -1;
++    release_motor(st, true);
++    if (st->ptz_fd >= 0) close(st->ptz_fd);
++    if (st->ptz_lock_fd >= 0) close(st->ptz_lock_fd);
++    st->ptz_fd = st->ptz_lock_fd = -1;
+ }
+-
+ void rvd_ptz_update(rvd_state_t *st)
+ {
+-        if (!st->ptz_tracking || st->ptz_fd < 0)
+-                return;
+-
+-        int64_t now = rss_timestamp_us();
+-        if (st->ptz_last_us && now - st->ptz_last_us < 200000)
+-                return;
+-
+-        rss_ivs_detect_result_t snap;
+-        pthread_mutex_lock(&st->ivs_det_lock);
+-        snap = st->ivs_detections;
+-        pthread_mutex_unlock(&st->ivs_det_lock);
+-        if (snap.count <= 0)
+-                return;
+-
+-        int best = 0;
+-        for (int i = 1; i < snap.count; i++)
+-                if (snap.detections[i].confidence > snap.detections[best].confidence)
+-                        best = i;
+-
+-        int b[4];
+-        memcpy(b, &snap.detections[best].box, sizeof(b));
+-        int w = (int)st->streams[1].enc_cfg.width;
+-        int h = (int)st->streams[1].enc_cfg.height;
+-        if (w <= 0 || h <= 0)
+-                return;
+-
+-        int cx = (b[0] + b[2]) / 2;
+-        int cy = (b[1] + b[3]) / 2;
+-        int ex = cx - w / 2;
+-        int ey = cy - h / 2;
+-        RSS_DEBUG("PTZ: bbox %d,%d,%d,%d frame %dx%d error %d,%d",
+-                  b[0], b[1], b[2], b[3], w, h, ex, ey);
+-        int dead_x = w / 10;
+-        int dead_y = h / 10;
+-        int dx = 0, dy = 0;
+-        if (ex > dead_x) dx = 8;
+-        else if (ex < -dead_x) dx = -8;
+-        if (ey > dead_y) dy = -4; /* image down = calibrated tilt down (Y-) */
+-        else if (ey < -dead_y) dy = 4;
+-        if (!dx && !dy)
+-                return;
+-
+-        struct motor_xy target = {
+-                clampi(st->ptz_x + dx, 0, PAN_MAX),
+-                clampi(st->ptz_y + dy, 0, TILT_MAX),
+-        };
+-        if (target.x == st->ptz_x && target.y == st->ptz_y)
+-                return;
+-
+-        if (flock(st->ptz_lock_fd, LOCK_EX) < 0)
+-                return;
+-        motor_active(true);
+-        if (ioctl(st->ptz_fd, MOTOR_ABSOLUTE, &target) == 0) {
+-                st->ptz_x = target.x;
+-                st->ptz_y = target.y;
+-                st->ptz_last_us = now;
+-                RSS_DEBUG("PTZ: target %d,%d from box %d,%d,%d,%d", target.x, target.y,
+-                          b[0], b[1], b[2], b[3]);
+-        } else {
+-                RSS_WARN("PTZ: MOTOR_ABSOLUTE failed: %s", strerror(errno));
++    rvd_ptz_tick(st);
++    if (!atomic_load(&st->ptz_tracking) || st->ptz_fd < 0 || st->ptz_owns_motor) return;
++    int64_t now = rss_timestamp_us();
++    if (now - st->ptz_last_us < 250000) return;
++    rss_ivs_detect_result_t snap;
++    pthread_mutex_lock(&st->ivs_det_lock);
++    snap = st->ivs_detections;
++    pthread_mutex_unlock(&st->ivs_det_lock);
++    if (snap.count <= 0 || snap.count > RSS_IVS_MAX_DETECTIONS ||
++        now - snap.timestamp > 500000 || snap.timestamp > now) return;
++    int w = st->streams[1].enc_cfg.width, h = st->streams[1].enc_cfg.height;
++    if (w <= 0 || h <= 0) return;
++    int best = -1, box[4] = {0};
++    for (int i = 0; i < snap.count; ++i) {
++        int p[4]; memcpy(p, &snap.detections[i].box, sizeof(p));
++        float score = snap.detections[i].confidence;
++        if (snap.detections[i].class_id != 0 || !(score > 0 && score <= 1) ||
++            p[0] < 0 || p[1] < 0 || p[2] <= p[0] || p[3] <= p[1] || p[2] > w || p[3] > h) continue;
++        if (best < 0 || score > snap.detections[best].confidence) {
++            best = i; memcpy(box, p, sizeof(box));
+         }
+-        motor_active(false);
+-        flock(st->ptz_lock_fd, LOCK_UN);
++    }
++    if (best < 0) return;
++    int ex = (box[0]+box[2])/2-w/2, ey = (box[1]+box[3])/2-h/2;
++    int dx = ex > w/10 ? 8 : ex < -w/10 ? -8 : 0;
++    int dy = ey > h/10 ? -4 : ey < -h/10 ? 4 : 0;
++    if (!dx && !dy) return;
++    /* Manual control holds this same lock for its entire movement. */
++    if (flock(st->ptz_lock_fd, LOCK_EX | LOCK_NB) < 0) return;
++    int busy = 0; struct motor_xy current;
++    if (!atomic_load(&st->ptz_tracking) || ioctl(st->ptz_fd,MOTOR_GET_BUSY,&busy) < 0 || busy ||
++        ioctl(st->ptz_fd,MOTOR_GET_POSITION,&current) < 0 ||
++        current.x < 0 || current.x > PAN_MAX || current.y < 0 || current.y > TILT_MAX) {
++        flock(st->ptz_lock_fd,LOCK_UN); return;
++    }
++    struct motor_xy target = {clampi(current.x+dx,0,PAN_MAX),clampi(current.y+dy,0,TILT_MAX)};
++    if (target.x == current.x && target.y == current.y) { flock(st->ptz_lock_fd,LOCK_UN); return; }
++    st->ptz_owns_motor = true;
++    int marker = open("/run/motors-active",O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC,0644);
++    if (marker >= 0) close(marker);
++    st->ptz_last_us = now;
++    if (ioctl(st->ptz_fd,MOTOR_ABSOLUTE,&target) < 0) {
++        RSS_WARN("PTZ: MOTOR_ABSOLUTE failed: %s",strerror(errno));
++        release_motor(st,false); return;
++    }
++    RSS_DEBUG("PTZ: target %d,%d from box %d,%d,%d,%d",target.x,target.y,box[0],box[1],box[2],box[3]);
+ }
+--- a/rvd/rvd.h
++++ b/rvd/rvd.h
+@@ -175,7 +175,9 @@
+ 	pthread_mutex_t ivs_det_lock;		/* protects ivs_detections */
+ 
+ 	/* Optional T41 PTZ person tracking. */
+-	bool ptz_tracking;
++	_Atomic bool ptz_tracking;
++	bool ptz_owns_motor;
++	int64_t ptz_retry_us;
+ 	int ptz_fd;
+ 	int ptz_lock_fd;
+ 	int ptz_x;
+@@ -227,5 +229,6 @@
+ int rvd_ptz_init(rvd_state_t *st);
+ void rvd_ptz_deinit(rvd_state_t *st);
+ void rvd_ptz_update(rvd_state_t *st);
++void rvd_ptz_tick(rvd_state_t *st);
+ 
+ #endif /* RVD_H */
+--- a/rvd/rvd_ivs.c
++++ b/rvd/rvd_ivs.c
+@@ -664,6 +664,7 @@
+ 	RSS_INFO("IVS poll thread started (algo=%s)", st->ivs_persondet ? "persondet" : "move");
+ 
+ 	while (rss_running(st->running) && atomic_load(&st->ivs_active)) {
++		rvd_ptz_tick(st);
+ 		int ret = RSS_HAL_CALL(st->ops, ivs_poll_result, st->hal_ctx, st->ivs_chn, 1000);
+ 		if (ret != 0)
+ 			continue;
+--- a/rvd/rvd_ctrl.c
++++ b/rvd/rvd_ctrl.c
+@@ -1287,6 +1287,31 @@
+ static int handle_ivs_cmd(const char *cmd, const char *cmd_json, rvd_state_t *st, char *resp,
+ 			  int resp_size)
+ {
++    if (strcmp(cmd, "ptz-status") == 0 || strcmp(cmd, "set-ptz-tracking") == 0) {
++        bool active = atomic_load(&st->ivs_active) && st->ivs_persondet;
++        if (strcmp(cmd, "set-ptz-tracking") == 0) {
++            int value = -1;
++            if (rss_json_get_int(cmd_json,"value",&value) != 0 || (value != 0 && value != 1))
++                return rss_ctrl_resp_error(resp,resp_size,"value must be 0 or 1");
++            if (value && (!active || access("/dev/motor", R_OK | W_OK) != 0))
++                return rss_ctrl_resp_error(resp,resp_size,"PersonDet or motor unavailable");
++            bool old = atomic_load(&st->ptz_tracking);
++            rss_config_set_bool(st->cfg,"motion","ptz_tracking",value != 0);
++            if (rss_config_save(st->cfg,st->config_path) != 0) {
++                rss_config_set_bool(st->cfg,"motion","ptz_tracking",old);
++                if (!value) atomic_store(&st->ptz_tracking,false);
++                return rss_ctrl_resp_error(resp,resp_size,"tracking setting could not be saved");
++            }
++            atomic_store(&st->ptz_tracking,value != 0);
++            RSS_INFO("PTZ: person tracking %s",value ? "enabled" : "disabled");
++        }
++        cJSON *r = cJSON_CreateObject();
++        cJSON_AddStringToObject(r,"status","ok");
++        cJSON_AddBoolToObject(r,"enabled",atomic_load(&st->ptz_tracking));
++        cJSON_AddBoolToObject(r,"detection_active",active);
++        cJSON_AddBoolToObject(r,"motor_available",access("/dev/motor",R_OK|W_OK) == 0);
++        return rss_ctrl_resp_json(resp,resp_size,r);
++    }
+ 	if (strcmp(cmd, "ivs-status") == 0) {
+ 		bool motion = atomic_load(&st->ivs_motion);
+ 		int64_t ts = atomic_load(&st->ivs_motion_ts);

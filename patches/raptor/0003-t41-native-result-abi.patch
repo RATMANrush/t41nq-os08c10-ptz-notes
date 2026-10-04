@@ -1,0 +1,70 @@
+--- a/rvd/rvd_ivs.c
++++ b/rvd/rvd_ivs.c
+@@ -443,6 +443,59 @@
+ 
+ static void ivs_process_persondet_result(rvd_state_t *st, void *result)
+ {
++#if defined(PLATFORM_T41)
++	/* Native PVP fefacc7c...629c: detect+0x1dc selects output+0x648,
++	 * records are 0x2c bytes; show box +0x10, class +0x20, score +0x28.
++	 * Class 0 observed on the user's person-only diagnostic test. */
++	if (!result)
++		return;
++	int raw_count;
++	memcpy(&raw_count, result, sizeof(raw_count));
++	if (raw_count < 0 || raw_count > 100)
++		return;
++	int w = (int)st->streams[1].enc_cfg.width;
++	int h = (int)st->streams[1].enc_cfg.height;
++	rss_ivs_detect_result_t parsed = {0};
++	int64_t now = rss_timestamp_us();
++	parsed.timestamp = now;
++	for (int i = 0; i < raw_count && parsed.count < RSS_IVS_MAX_DETECTIONS; ++i) {
++		const char *r = (const char *)result + 0x648 + i * 0x2c;
++		int b[4], cls;
++		float score;
++		memcpy(b, r + 0x10, sizeof(b));
++		memcpy(&cls, r + 0x20, sizeof(cls));
++		memcpy(&score, r + 0x28, sizeof(score));
++		if (cls != 0 || !(score > 0.0f && score <= 1.0f) ||
++		    b[0] < 0 || b[1] < 0 || b[2] <= b[0] || b[3] <= b[1] ||
++		    b[2] > w || b[3] > h)
++			continue;
++		int n = parsed.count++;
++		parsed.detections[n].box = (rss_rect_t){b[0], b[1], b[2], b[3]};
++		parsed.detections[n].confidence = score;
++		parsed.detections[n].class_id = 0;
++	}
++	bool prev = atomic_load(&st->ivs_motion);
++	if (parsed.count > 0) {
++		atomic_store(&st->ivs_motion, true);
++		atomic_store(&st->ivs_person_count, parsed.count);
++		atomic_store(&st->ivs_motion_ts, now);
++		pthread_mutex_lock(&st->ivs_det_lock);
++		st->ivs_detections = parsed;
++		pthread_mutex_unlock(&st->ivs_det_lock);
++		if (!prev)
++			RSS_DEBUG("IVS T41 native ABI: %d person(s) detected", parsed.count);
++		/* Only fresh, valid person rectangles may reach the motor. */
++		rvd_ptz_update(st);
++	} else if (prev && now - atomic_load(&st->ivs_motion_ts) > 2000000) {
++		atomic_store(&st->ivs_motion, false);
++		atomic_store(&st->ivs_person_count, 0);
++		pthread_mutex_lock(&st->ivs_det_lock);
++		st->ivs_detections.count = 0;
++		pthread_mutex_unlock(&st->ivs_det_lock);
++		RSS_DEBUG("IVS: persons cleared");
++	}
++#else
++
+ 	/*
+ 	 * persondet_param_output_t layout (from SDK header):
+ 	 *   offset 0:  int count
+@@ -528,6 +581,7 @@
+ 			RSS_DEBUG("IVS: persons cleared");
+ 		}
+ 	}
++#endif
+ }
+ 
+ #ifdef JZDL

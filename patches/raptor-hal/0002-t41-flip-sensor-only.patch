@@ -1,0 +1,34 @@
+--- a/src/hal_isp.c
++++ b/src/hal_isp.c
+@@ -135,7 +135,6 @@
+     IMPISPHVFLIPAttr attr;
+     memset(&attr, 0, sizeof(attr));
+     attr.sensor_mode = (IMPISPHVFLIP)mode;
+-    attr.isp_mode[0] = (IMPISPHVFLIP)mode;
+     return IMP_ISP_Tuning_SetHVFLIP(IMPVI_MAIN, &attr);
+ #endif
+ }
+@@ -165,7 +164,6 @@
+     IMPISPHVFLIPAttr attr;
+     memset(&attr, 0, sizeof(attr));
+     attr.sensor_mode = (IMPISPHVFLIP)mode;
+-    attr.isp_mode[0] = (IMPISPHVFLIP)mode;
+     return IMP_ISP_Tuning_SetHVFLIP(IMPVI_MAIN, &attr);
+ #endif
+ }
+@@ -3263,7 +3261,6 @@
+         IMPISPHVFLIPAttr attr;
+         memset(&attr, 0, sizeof(attr));
+         attr.sensor_mode = (IMPISPHVFLIP)mode;
+-        attr.isp_mode[0] = (IMPISPHVFLIP)mode;
+         return IMP_ISP_Tuning_SetHVFLIP((IMPVI_NUM)sensor_idx, &attr);
+ #elif defined(HAL_T23_MULTICAM)
+         return IMP_ISP_MultiCamera_Tuning_SetHVFLIP((IMPVI_NUM)sensor_idx, mode);
+@@ -3300,7 +3297,6 @@
+         IMPISPHVFLIPAttr attr;
+         memset(&attr, 0, sizeof(attr));
+         attr.sensor_mode = (IMPISPHVFLIP)mode;
+-        attr.isp_mode[0] = (IMPISPHVFLIP)mode;
+         return IMP_ISP_Tuning_SetHVFLIP((IMPVI_NUM)sensor_idx, &attr);
+ #elif defined(HAL_T23_MULTICAM)
+         return IMP_ISP_MultiCamera_Tuning_SetHVFLIP((IMPVI_NUM)sensor_idx, mode);

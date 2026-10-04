@@ -1,0 +1,23 @@
+--- a/rvd/rvd_ptz.c
++++ b/rvd/rvd_ptz.c
+@@ -101,7 +101,11 @@
+      * while the final correction remains small and stable near centre. */
+     int px = pan_step(ex);
+     int dx = ex > w/10 ? px : ex < -w/10 ? -px : 0;
+-    int dy = ey > h/10 ? 4 : ey < -h/10 ? -4 : 0;
++    int tilt_min = clampi(rss_config_get_int(st->cfg, "motion", "ptz_tilt_step_min", 3), 1, 40);
++    int tilt_max = clampi(rss_config_get_int(st->cfg, "motion", "ptz_tilt_step_max", 12), tilt_min, 40);
++    int tilt_dz = clampi(rss_config_get_int(st->cfg, "motion", "ptz_tilt_deadzone_pct", 8), 1, 40);
++    int ty = clampi((ey < 0 ? -ey : ey) / 8, tilt_min, tilt_max);
++    int dy = ey > h * tilt_dz / 100 ? ty : ey < -h * tilt_dz / 100 ? -ty : 0;
+     /* Motor direction versus image orientation depends on mounting and flip. */
+     if (rss_config_get_bool(st->cfg, "motion", "ptz_invert_pan", true)) dx = -dx;
+     if (rss_config_get_bool(st->cfg, "motion", "ptz_invert_tilt", false)) dy = -dy;
+@@ -115,6 +119,7 @@
+         flock(st->ptz_lock_fd,LOCK_UN); return;
+     }
+     struct motor_xy target = {clampi(current.x+dx,0,PAN_MAX),clampi(current.y+dy,0,TILT_MAX)};
++    RSS_DEBUG("PTZ: ex=%d ey=%d dx=%d dy=%d cur=%d,%d", ex, ey, dx, dy, current.x, current.y);
+     if (target.x == current.x && target.y == current.y) { flock(st->ptz_lock_fd,LOCK_UN); return; }
+     st->ptz_owns_motor = true;
+     int marker = open("/run/motors-active",O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC,0644);

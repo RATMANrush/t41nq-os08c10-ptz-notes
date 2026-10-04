@@ -1,0 +1,227 @@
+--- a/rvd/rvd_ptz.c
++++ b/rvd/rvd_ptz.c
+@@ -131,3 +131,137 @@
+     }
+     RSS_DEBUG("PTZ: target %d,%d from box %d,%d,%d,%d",target.x,target.y,box[0],box[1],box[2],box[3]);
+ }
++
++/* ---- White light on person detection (T41) ----
++ * Active only when [motion] white_light is true.  Darkness is judged from
++ * ae_luma while the light is off; once on, the light stays latched until no
++ * person was seen for white_light_hold_sec. */
++#include <stdio.h>
++
++#define LIGHT_MARKER "/run/white-light-auto"
++
++static struct {
++    bool on;
++    bool adopted;
++    bool dark;
++    int hits;
++    int conf_x100;
++    unsigned luma;
++    int64_t on_us, seen_us, cooldown_us, dark_check_us;
++} g_light;
++
++static int light_gpio_write(int gpio, const char *level)
++{
++    char path[64];
++    snprintf(path, sizeof(path), "/sys/class/gpio/gpio%d/direction", gpio);
++    int fd = open(path, O_WRONLY | O_CLOEXEC);
++    if (fd < 0) {
++        int ex = open("/sys/class/gpio/export", O_WRONLY | O_CLOEXEC);
++        if (ex >= 0) {
++            char num[16];
++            int n = snprintf(num, sizeof(num), "%d", gpio);
++            if (write(ex, num, (size_t)n) < 0) { /* already exported */ }
++            close(ex);
++        }
++        fd = open(path, O_WRONLY | O_CLOEXEC);
++        if (fd < 0) return -1;
++    }
++    ssize_t r = write(fd, level, strlen(level));
++    close(fd);
++    return r < 0 ? -1 : 0;
++}
++
++static void light_set(rvd_state_t *st, bool on)
++{
++    int gpio = rss_config_get_int(st->cfg, "motion", "white_light_gpio", 81);
++    bool active_low = rss_config_get_bool(st->cfg, "motion", "white_light_active_low", true);
++    const char *level = (on == active_low) ? "low" : "high";
++    if (light_gpio_write(gpio, level) != 0) {
++        RSS_WARN("LIGHT: cannot drive gpio%d", gpio);
++        return;
++    }
++    if (on) {
++        int m = open(LIGHT_MARKER, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
++        if (m >= 0) close(m);
++    } else {
++        unlink(LIGHT_MARKER);
++    }
++    g_light.on = on;
++}
++
++bool rvd_light_state(int *conf_x100, unsigned *luma, bool *dark)
++{
++    if (conf_x100) *conf_x100 = g_light.conf_x100;
++    if (luma) *luma = g_light.luma;
++    if (dark) *dark = g_light.dark;
++    return g_light.on;
++}
++
++/* Called from the IVS thread for every person-detection result (also when empty). */
++void rvd_light_update(rvd_state_t *st, const rss_ivs_detect_result_t *r, int64_t now)
++{
++    if (!g_light.adopted) {
++        g_light.adopted = true;
++        /* rvd restarted while the light was on: take over, so it is switched off later. */
++        if (access(LIGHT_MARKER, F_OK) == 0) {
++            g_light.on = true;
++            g_light.on_us = g_light.seen_us = now;
++        }
++    }
++    if (!rss_config_get_bool(st->cfg, "motion", "white_light", false)) {
++        if (g_light.on) {
++            light_set(st, false);
++            RSS_INFO("LIGHT: disabled, white light off");
++        }
++        g_light.hits = 0;
++        return;
++    }
++    int conf_pct = clampi(rss_config_get_int(st->cfg, "motion", "white_light_conf", 60), 1, 100);
++    int frames = clampi(rss_config_get_int(st->cfg, "motion", "white_light_frames", 3), 1, 20);
++    int hold = clampi(rss_config_get_int(st->cfg, "motion", "white_light_hold_sec", 30), 5, 600);
++    int min_on = clampi(rss_config_get_int(st->cfg, "motion", "white_light_min_on_sec", 10), 1, 600);
++    int cool = clampi(rss_config_get_int(st->cfg, "motion", "white_light_cooldown_sec", 5), 0, 600);
++    int luma_max = clampi(rss_config_get_int(st->cfg, "motion", "white_light_luma_max", 30), 1, 255);
++
++    int count = r ? r->count : 0;
++    float best = 0.0f;
++    for (int i = 0; i < count && i < RSS_IVS_MAX_DETECTIONS; ++i)
++        if (r->detections[i].confidence > best) best = r->detections[i].confidence;
++    g_light.conf_x100 = (int)(best * 100.0f + 0.5f);
++    if (count > 0) g_light.seen_us = now;
++
++    if (g_light.on) {
++        if (now - g_light.seen_us > (int64_t)hold * 1000000 &&
++            now - g_light.on_us > (int64_t)min_on * 1000000) {
++            light_set(st, false);
++            g_light.cooldown_us = now + (int64_t)cool * 1000000;
++            g_light.hits = 0;
++            RSS_INFO("LIGHT: white light off");
++        }
++        return;
++    }
++
++    if (best * 100.0f >= (float)conf_pct) {
++        if (g_light.hits < 1000) g_light.hits++;
++    } else {
++        g_light.hits = 0;
++    }
++
++    /* Light is off: judge darkness about once per second. */
++    if (now - g_light.dark_check_us > 1000000) {
++        rss_exposure_t ex = {0};
++        RSS_HAL_CALL(st->ops, isp_get_exposure, st->hal_ctx, &ex);
++        bool valid = (ex.valid_mask & RSS_EXPOSURE_VALID_AE_LUMA) != 0;
++        g_light.luma = (unsigned)ex.ae_luma;
++        g_light.dark = valid && (int)ex.ae_luma <= luma_max;
++        g_light.dark_check_us = now;
++    }
++
++    if (g_light.dark && g_light.hits >= frames && now >= g_light.cooldown_us) {
++        light_set(st, true);
++        if (g_light.on) {
++            g_light.on_us = g_light.seen_us = now;
++            RSS_INFO("LIGHT: white light on (conf=%d%% luma=%u)", g_light.conf_x100, g_light.luma);
++        }
++    }
++}
+--- a/rvd/rvd_ctrl.c
++++ b/rvd/rvd_ctrl.c
+@@ -1312,6 +1312,65 @@
+         cJSON_AddBoolToObject(r,"motor_available",access("/dev/motor",R_OK|W_OK) == 0);
+         return rss_ctrl_resp_json(resp,resp_size,r);
+     }
++    {
++        extern bool rvd_light_state(int *conf_x100, unsigned *luma, bool *dark);
++        static const struct { const char *cmd, *key; int is_bool, lo, hi; } tune[] = {
++            {"set-white-light", "white_light", 1, 0, 1},
++            {"set-white-light-conf", "white_light_conf", 0, 1, 100},
++            {"set-white-light-frames", "white_light_frames", 0, 1, 20},
++            {"set-white-light-hold", "white_light_hold_sec", 0, 5, 600},
++            {"set-white-light-min-on", "white_light_min_on_sec", 0, 1, 600},
++            {"set-white-light-cooldown", "white_light_cooldown_sec", 0, 0, 600},
++            {"set-white-light-luma", "white_light_luma_max", 0, 1, 255},
++            {"set-ptz-invert-pan", "ptz_invert_pan", 1, 0, 1},
++            {"set-ptz-invert-tilt", "ptz_invert_tilt", 1, 0, 1},
++            {"set-ptz-tilt-min", "ptz_tilt_step_min", 0, 1, 40},
++            {"set-ptz-tilt-max", "ptz_tilt_step_max", 0, 1, 40},
++            {"set-ptz-tilt-deadzone", "ptz_tilt_deadzone_pct", 0, 1, 40},
++        };
++        for (size_t ti = 0; ti < sizeof(tune) / sizeof(tune[0]); ++ti) {
++            if (strcmp(cmd, tune[ti].cmd) != 0) continue;
++            int value = -1;
++            if (rss_json_get_int(cmd_json, "value", &value) != 0 || value < tune[ti].lo || value > tune[ti].hi)
++                return rss_ctrl_resp_error(resp, resp_size, "value out of range");
++            int old = tune[ti].is_bool ? (rss_config_get_bool(st->cfg, "motion", tune[ti].key, false) ? 1 : 0)
++                                       : rss_config_get_int(st->cfg, "motion", tune[ti].key, 0);
++            if (tune[ti].is_bool) rss_config_set_bool(st->cfg, "motion", tune[ti].key, value != 0);
++            else rss_config_set_int(st->cfg, "motion", tune[ti].key, value);
++            if (rss_config_save(st->cfg, st->config_path) != 0) {
++                if (tune[ti].is_bool) rss_config_set_bool(st->cfg, "motion", tune[ti].key, old != 0);
++                else rss_config_set_int(st->cfg, "motion", tune[ti].key, old);
++                return rss_ctrl_resp_error(resp, resp_size, "setting could not be saved");
++            }
++            RSS_INFO("TUNE: %s = %d", tune[ti].key, value);
++            cJSON *r = cJSON_CreateObject();
++            cJSON_AddStringToObject(r, "status", "ok");
++            cJSON_AddStringToObject(r, "key", tune[ti].key);
++            cJSON_AddNumberToObject(r, "value", (double)value);
++            return rss_ctrl_resp_json(resp, resp_size, r);
++        }
++        if (strcmp(cmd, "white-light-status") == 0) {
++            int last_conf = 0;
++            unsigned luma = 0;
++            bool dark = false;
++            bool on = rvd_light_state(&last_conf, &luma, &dark);
++            cJSON *r = cJSON_CreateObject();
++            cJSON_AddStringToObject(r, "status", "ok");
++            cJSON_AddBoolToObject(r, "enabled", rss_config_get_bool(st->cfg, "motion", "white_light", false));
++            cJSON_AddNumberToObject(r, "conf", (double)rss_config_get_int(st->cfg, "motion", "white_light_conf", 60));
++            cJSON_AddNumberToObject(r, "frames", (double)rss_config_get_int(st->cfg, "motion", "white_light_frames", 3));
++            cJSON_AddNumberToObject(r, "hold_sec", (double)rss_config_get_int(st->cfg, "motion", "white_light_hold_sec", 30));
++            cJSON_AddNumberToObject(r, "min_on_sec", (double)rss_config_get_int(st->cfg, "motion", "white_light_min_on_sec", 10));
++            cJSON_AddNumberToObject(r, "cooldown_sec", (double)rss_config_get_int(st->cfg, "motion", "white_light_cooldown_sec", 5));
++            cJSON_AddNumberToObject(r, "luma_max", (double)rss_config_get_int(st->cfg, "motion", "white_light_luma_max", 30));
++            cJSON_AddBoolToObject(r, "light_on", on);
++            cJSON_AddBoolToObject(r, "dark", dark);
++            cJSON_AddNumberToObject(r, "luma", (double)luma);
++            cJSON_AddNumberToObject(r, "last_conf", (double)last_conf);
++            cJSON_AddBoolToObject(r, "detection_active", atomic_load(&st->ivs_active) && st->ivs_persondet);
++            return rss_ctrl_resp_json(resp, resp_size, r);
++        }
++    }
+ 	if (strcmp(cmd, "ivs-status") == 0) {
+ 		bool motion = atomic_load(&st->ivs_motion);
+ 		int64_t ts = atomic_load(&st->ivs_motion_ts);
+--- a/rvd/rvd_ivs.c
++++ b/rvd/rvd_ivs.c
+@@ -441,6 +441,8 @@
+ 	}
+ }
+ 
++extern void rvd_light_update(rvd_state_t *st, const rss_ivs_detect_result_t *r, int64_t now);
++
+ static void ivs_process_persondet_result(rvd_state_t *st, void *result)
+ {
+ #if defined(PLATFORM_T41)
+@@ -487,6 +489,7 @@
+                         last_conf_log_us = now;
+                 }
+         }
++        rvd_light_update(st, &parsed, now);
+ 	bool prev = atomic_load(&st->ivs_motion);
+ 	if (parsed.count > 0) {
+ 		atomic_store(&st->ivs_motion, true);

@@ -1,0 +1,18 @@
+# NAME: PTZ camera (T41NQ, OS08C10, ETH, RTL8733BU)
+# FRAG: soc-xburst2 core
+BR2_ETHERNET=y
+BR2_INGENIC_SOC_MODEL="t41nq"
+BR2_PACKAGE_THINGINO_UBOOT_FLASH_CONTROLLER_JZ_SFC=n
+BR2_PACKAGE_THINGINO_UBOOT_FLASH_CONTROLLER_SFC0_NOR=y
+BR2_PACKAGE_WIFI=y
+BR2_PACKAGE_WIFI_RTL8733BU=y
+BR2_SENSOR_1_NAME="os08c10"
+BR2_THINGINO_AUDIO=y
+BR2_THINGINO_NMEM_MB=9
+BR2_THINGINO_RMEM_MB=56
+FLASH_SIZE_MB=16
+
+# RMEM/NMEM (56/9 MB) were measured working with Raptor and a 3840x2160 main
+# stream on this camera; they were not tested with prudynt.
+# TODO: vendor pan/tilt motor (/dev/motor, vendor motor.ko), IR-cut GPIO 49/50,
+# white LED GPIO 81 (active low): see README.md.

@@ -1,0 +1,5 @@
+--- a/rvd/rvd_ptz.c
++++ b/rvd/rvd_ptz.c
+@@ -100,1 +100,1 @@
+-    int dy = ey > h/10 ? -4 : ey < -h/10 ? 4 : 0;
++    int dy = ey > h/10 ? 4 : ey < -h/10 ? -4 : 0;

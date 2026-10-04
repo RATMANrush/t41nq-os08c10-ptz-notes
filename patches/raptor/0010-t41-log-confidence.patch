@@ -1,0 +1,22 @@
+--- a/rvd/rvd_ivs.c
++++ b/rvd/rvd_ivs.c
+@@ -474,6 +474,19 @@
+ 		parsed.detections[n].confidence = score;
+ 		parsed.detections[n].class_id = 0;
+ 	}
++        if (parsed.count > 0) {
++                static int64_t last_conf_log_us;
++                if (now - last_conf_log_us > 500000) {
++                        float best = 0.0f;
++                        for (int k = 0; k < parsed.count; ++k)
++                                if (parsed.detections[k].confidence > best)
++                                        best = parsed.detections[k].confidence;
++                        rss_exposure_t ex = {0};
++                        RSS_HAL_CALL(st->ops, isp_get_exposure, st->hal_ctx, &ex);
++                        RSS_DEBUG("IVS: conf=%.2f n=%d luma=%u gain=%u", (double)best, parsed.count, (unsigned)ex.ae_luma, (unsigned)ex.total_gain);
++                        last_conf_log_us = now;
++                }
++        }
+ 	bool prev = atomic_load(&st->ivs_motion);
+ 	if (parsed.count > 0) {
+ 		atomic_store(&st->ivs_motion, true);

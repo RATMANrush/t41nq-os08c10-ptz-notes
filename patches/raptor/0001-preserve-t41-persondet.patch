@@ -1,0 +1,106 @@
+diff --git a/Makefile b/Makefile
+index 013cc1f..d478fb3 100644
+--- a/Makefile
++++ b/Makefile
+@@ -179,12 +179,42 @@ endif
+ LDFLAGS_HAL := $(LDFLAGS_SYSROOT) $(SHIM_LIB) -limp -lalog -lpthread -lrt -lm -ldl -latomic
+ 
+ # IVS detection libs
++
+ ifeq ($(IVS_DETECT),1)
+ CFLAGS += -DIVS_DETECT
++
++ifeq ($(JZDL),1)
++CFLAGS += -DJZDL
+ LDFLAGS_HAL += -ljzdl.m $(LINK_STDCXX)
++endif
++
+ ifeq ($(PERSONDET),1)
+ CFLAGS += -DPERSONDET
+-LDFLAGS_HAL += -lpersonDet_inf -ljzdl -Wl,--no-as-needed -lmxu_core -lmxu_imgproc -lmxu_merge -lmxu_video -Wl,--as-needed
++
++ifeq ($(PLATFORM),T41)
++LDFLAGS_HAL += -Wl,--no-as-needed \
++    $(LINK_STDCXX) \
++    -lmxu_core \
++    -lmxu_imgproc \
++    -lmxu_merge \
++    -lmxu_video \
++    -laip \
++    -ldrivers \
++    -lvenus \
++    -lpersonvehiclepetDet_inf \
++    -limp \
++    -lalog \
++    -Wl,--as-needed
++else
++LDFLAGS_HAL += -lpersonDet_inf -ljzdl \
++	-Wl,--no-as-needed \
++	-lmxu_core \
++	-lmxu_imgproc \
++	-lmxu_merge \
++	-lmxu_video \
++	-Wl,--as-needed
++endif
++
+ endif
+ endif
+ LDFLAGS     := $(LDFLAGS_SYSROOT) -lpthread -lrt -latomic
+@@ -251,7 +281,7 @@ ifneq ($(wildcard $(HAL_DIR)/Makefile),)
+ .PHONY: build-raptor-hal
+ build-raptor-hal:
+ 	@echo "  BUILD   raptor-hal"
+-	$(Q)$(MAKE) -C $(HAL_DIR) PLATFORM=$(PLATFORM) CROSS_COMPILE=$(CROSS_COMPILE) \
++	$(Q)$(MAKE) -C $(HAL_DIR) PLATFORM=$(PLATFORM) CROSS_COMPILE=$(CROSS_COMPILE) JZDL=$(JZDL) \
+ 		$(if $(DEBUG),DEBUG=1,) \
+ 		$(if $(filter 1,$(V4L2_OPENIMP)),V4L2_OPENIMP=1,)
+ 
+diff --git a/rvd/rvd_ivs.c b/rvd/rvd_ivs.c
+index 9ccb3fa..e3f271d 100644
+--- a/rvd/rvd_ivs.c
++++ b/rvd/rvd_ivs.c
+@@ -27,7 +27,7 @@
+ 
+ #include "rvd.h"
+ 
+-#ifdef IVS_DETECT
++#ifdef JZDL
+ /* FrameSource direct access — for JZDL standalone inference.
+  * Struct layout from imp_common.h, declared here to avoid SDK header dep. */
+ typedef struct {
+@@ -103,7 +103,7 @@ int rvd_ivs_start(rvd_state_t *st)
+ 	void *algo_handle = NULL;
+ 	st->ivs_persondet = false;
+ 
+-#ifdef IVS_DETECT
++#ifdef JZDL
+ 	if (strcmp(algo, "yolo") == 0) {
+ 		/* JZDL standalone mode — skip IVS pipeline, use FrameSource directly */
+ 		rss_ivs_jzdl_param_t jp = {0};
+@@ -283,7 +283,7 @@ void rvd_ivs_stop(rvd_state_t *st)
+ 	if (!atomic_load(&st->ivs_active))
+ 		return;
+ 
+-#ifdef IVS_DETECT
++#ifdef JZDL
+ 	/* JZDL standalone — no IVS channel to stop */
+ 	if (st->ivs_jzdl) {
+ 		if (st->jzdl_handle) {
+@@ -521,7 +521,7 @@ static void ivs_process_persondet_result(rvd_state_t *st, void *result)
+ 	}
+ }
+ 
+-#ifdef IVS_DETECT
++#ifdef JZDL
+ /*
+  * JZDL standalone inference thread — reads NV12 frames directly from
+  * the IVS FrameSource channel and runs JZDL model inference.
+@@ -592,7 +592,7 @@ void *rvd_ivs_thread(void *arg)
+ {
+ 	rvd_state_t *st = arg;
+ 
+-#ifdef IVS_DETECT
++#ifdef JZDL
+ 	/* JZDL standalone mode — different thread function */
+ 	if (st->ivs_jzdl)
+ 		return rvd_jzdl_thread(arg);

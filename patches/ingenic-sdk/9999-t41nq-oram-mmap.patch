@@ -1,0 +1,60 @@
+--- a/4.4.94/misc/soc-nna/soc_nna_main.c
++++ b/4.4.94/misc/soc-nna/soc_nna_main.c
+@@ -14,7 +14,7 @@
+ 
+ #define CPU_SIMULATOR
+ #define CMD_LINE "/proc/cmdline"
+-#define SOC_NNA_VERSION "H20230310"
++#define SOC_NNA_VERSION "H20230310-t41nq-mmap1"
+ 
+ #ifdef CONFIG_SOC_T41
+ 	#define SOC_NNA_BORD "T41"
+@@ -614,12 +614,28 @@
+ 	uint32_t oram_base = 0;
+ #endif
+ 
++	/* Reject shifted physical offsets and wrapped physical end addresses. */
++	if (vma->vm_pgoff > (~0UL >> PAGE_SHIFT) ||
++	    vma->vm_end <= vma->vm_start || paddr_end <= paddr_start)
++		return -EINVAL;
++
+ #ifndef CONFIG_SOC_A1
+ 	/* 设置 pfn的属性 */
+ 	vma->vm_flags |= VM_IO;
+ 	get_nmem_info(&nmem_addr, &nmem_size);
+ 
+-	/* 根据地址区分地址的类型 */
++	/* T41NQ native userspace maps 256 KiB at this ORAM window.
++	 * Keep the legacy 0x12620000 window for the other T41 variant.
++	 */
++#ifdef CONFIG_SOC_T41
++	if (paddr_start == 0x12640000) {
++		if (paddr_end <= paddr_start ||
++		    paddr_end - paddr_start > 0x40000)
++			return -EINVAL;
++		mmap_type = 1;
++		extend = 0;
++	} else
++#endif
+ 	if(paddr_start == 0x12620000){
+ 		mmap_type = 1;//oram
+ 		extend = 0;
+@@ -737,6 +753,18 @@
+ 			}
+ 		}
+ 			/*根据上层传过来扩充映射内存的大小和ORAM size，来做处理，每次映射的区域不能超过实际的物理大小，不改变物理地址，根据虚拟地址偏移多次映射来达到扩充虚拟地址的目的 */
++		/* Validate all alias segments before installing the first PTE.
++		 * Subtraction must not wrap, and page rounding must not make
++		 * consecutive segments overlap or extend beyond this VMA.
++		 */
++		if (!real_size ||
++		    ((real_paddr | real_size) & (PAGE_SIZE - 1)) ||
++		    paddr_start > real_paddr || real_paddr > paddr_end ||
++		    real_size > paddr_end - real_paddr) {
++			pr_err("soc_nna: invalid mmap range %lx-%lx buffer %x+%x\n",
++			       paddr_start, paddr_end, real_paddr, real_size);
++			return -EINVAL;
++		}
+ 			before_s = real_paddr - paddr_start;
+ 			set_oram_nums = before_s / real_size;
+ 			set_oram_nums += before_s%real_size ? 1 : 0;
